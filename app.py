@@ -1,12 +1,15 @@
+import io
 import re
-import streamlit as st
+import urllib.request
+import zipfile
+
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.pipeline import Pipeline
+import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score, confusion_matrix
-from ucimlrepo import fetch_ucirepo
+from sklearn.pipeline import Pipeline
 
 st.set_page_config(page_title="AI Scam Message Detector", page_icon="🛡️", layout="wide")
 
@@ -22,19 +25,61 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner="Training the machine-learning model on the public SMS dataset...")
+
+@st.cache_data(show_spinner=False)
+def load_sms_dataset():
+    """Download and read the UCI SMS Spam Collection without ucimlrepo's API."""
+    url = "https://archive.ics.uci.edu/static/public/228/sms+spam+collection.zip"
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; SMSScamDetector/1.0)"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:
+        archive_bytes = response.read()
+
+    with zipfile.ZipFile(io.BytesIO(archive_bytes)) as archive:
+        dataset_file = next(
+            (name for name in archive.namelist() if name.rsplit("/", 1)[-1] == "SMSSpamCollection"),
+            None,
+        )
+        if dataset_file is None:
+            raise ValueError("The UCI download did not contain SMSSpamCollection.")
+        with archive.open(dataset_file) as dataset_stream:
+            data = pd.read_csv(
+                dataset_stream,
+                sep="\t",
+                header=None,
+                names=["label", "message"],
+                encoding="utf-8",
+                on_bad_lines="skip",
+            )
+
+    data = data.dropna(subset=["label", "message"])
+    data["label"] = data["label"].astype(str).str.strip().str.lower()
+    data["message"] = data["message"].astype(str)
+    data = data[data["label"].isin(["ham", "spam"])]
+    if data.empty:
+        raise ValueError("The downloaded UCI dataset contains no usable records.")
+    return data
+
+
+@st.cache_resource(show_spinner="Downloading the public SMS dataset and training the model...")
 def train_model():
-    dataset = fetch_ucirepo(id=228)
-    X = dataset.data.features.iloc[:, 0].fillna("").astype(str)
-    y_raw = dataset.data.targets.iloc[:, 0].astype(str).str.lower()
-    y = y_raw.map(lambda v: 1 if v.strip() == "spam" else 0)
+    dataset = load_sms_dataset()
+    X = dataset["message"]
+    y = dataset["label"].map({"ham": 0, "spam": 1})
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.20, random_state=42, stratify=y
     )
     model = Pipeline([
-        ("tfidf", TfidfVectorizer(lowercase=True, strip_accents="unicode",
-                                  ngram_range=(1, 2), min_df=2, sublinear_tf=True)),
-        ("classifier", MultinomialNB(alpha=0.35))
+        ("tfidf", TfidfVectorizer(
+            lowercase=True,
+            strip_accents="unicode",
+            ngram_range=(1, 2),
+            min_df=2,
+            sublinear_tf=True,
+        )),
+        ("classifier", MultinomialNB(alpha=0.35)),
     ])
     model.fit(X_train, y_train)
     pred = model.predict(X_test)
@@ -44,13 +89,14 @@ def train_model():
         "recall": recall_score(y_test, pred, zero_division=0),
         "f1": f1_score(y_test, pred, zero_division=0),
         "test_size": len(y_test),
-        "dataset_size": len(X)
+        "dataset_size": len(dataset),
     }
     return model, metrics
 
+
 st.markdown("""
 <div class="hero">
-  <h1>🛡️ AI Scam & Phishing Message Detector</h1>
+  <h1>🛡️ AI Scam &amp; Phishing Message Detector</h1>
   <p>Check suspicious SMS and short messages with a machine-learning model.</p>
 </div>
 """, unsafe_allow_html=True)
@@ -76,18 +122,18 @@ with left:
     message = st.text_area(
         "Enter or paste a suspicious message",
         height=180,
-        placeholder="Example: Your account will be blocked today. Verify your details at http://example.com"
+        placeholder="Example: Your account will be blocked today. Verify your details at http://example.com",
     )
     analyze = st.button("Analyze message", type="primary", use_container_width=True)
 
 with right:
     st.subheader("Model test results")
     c1, c2 = st.columns(2)
-    c1.metric("Accuracy", f"{metrics['accuracy']*100:.1f}%")
-    c2.metric("F1 score", f"{metrics['f1']*100:.1f}%")
+    c1.metric("Accuracy", f"{metrics['accuracy'] * 100:.1f}%")
+    c2.metric("F1 score", f"{metrics['f1'] * 100:.1f}%")
     c3, c4 = st.columns(2)
-    c3.metric("Precision", f"{metrics['precision']*100:.1f}%")
-    c4.metric("Recall", f"{metrics['recall']*100:.1f}%")
+    c3.metric("Precision", f"{metrics['precision'] * 100:.1f}%")
+    c4.metric("Recall", f"{metrics['recall'] * 100:.1f}%")
     st.caption(f"Evaluated on a held-out test set of {metrics['test_size']:,} messages from {metrics['dataset_size']:,} records.")
 
 warning_patterns = {
@@ -95,7 +141,7 @@ warning_patterns = {
     "Requests sensitive information": r"\b(password|pin|otp|cvv|card number|account details|aadhaar|pan)\b",
     "Prize or reward claim": r"\b(won|winner|prize|lottery|claim|reward|free gift)\b",
     "Payment request": r"\b(pay|payment|transfer|fee|deposit|upi|refund)\b",
-    "Link included": r"(https?://|www\.)"
+    "Link included": r"(https?://|www\.)",
 }
 
 if analyze:
@@ -113,13 +159,13 @@ if analyze:
             st.markdown(f"""
             <div class="result-risk">
               <h3>⚠️ Potential spam / scam-like message</h3>
-              <p>Model spam score: <b>{spam_probability*100:.1f}%</b></p>
+              <p>Model spam score: <b>{spam_probability * 100:.1f}%</b></p>
             </div>""", unsafe_allow_html=True)
         else:
             st.markdown(f"""
             <div class="result-safe">
               <h3>✅ Likely legitimate message</h3>
-              <p>Model spam score: <b>{spam_probability*100:.1f}%</b></p>
+              <p>Model spam score: <b>{spam_probability * 100:.1f}%</b></p>
             </div>""", unsafe_allow_html=True)
 
         st.progress(spam_probability, text="Estimated spam probability")
@@ -145,5 +191,5 @@ with st.expander("How does the AI model work?"):
     st.write("4. A separate keyword checklist highlights common warning signs.")
     st.write("The model is trained at app startup using the public UCI SMS Spam Collection dataset.")
 
-st.caption("Dataset: Almeida & Hidalgo (2011), UCI Machine Learning Repository, SMS Spam Collection, DOI: 10.24432/C5CC84. Dataset is English-language and may not generalize to Hindi, Hinglish, regional languages, or current India-specific scams.")
+st.caption("Dataset: Almeida & Hidalgo (2011), UCI Machine Learning Repository, SMS Spam Collection, DOI: 10.24432/C5CC84. The dataset is English-language and may not generalize to Hindi, Hinglish, regional languages, or newer scam tactics.")
 st.caption("Privacy: This demo does not save messages to a database. Avoid entering real OTPs, account details, phone numbers, or other sensitive information.")
